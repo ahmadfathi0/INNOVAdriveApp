@@ -3,6 +3,77 @@ from tkinter import Tk, Canvas, PhotoImage
 import cv2
 import numpy as np
 from PIL import Image, ImageTk
+import websocket  # Changed from websockets to websocket
+import json
+import threading
+import time
+
+# WebSocket client for handling flag data
+class FlagWebSocketClient:
+    def __init__(self, url, on_flag_update=None):
+        self.url = url
+        self.on_flag_update = on_flag_update
+        self.ws = None
+        self.is_connected = False
+        self.reconnect_interval = 3  # seconds
+        self.thread = None
+        self.running = False
+
+    def start(self):
+        self.running = True
+        self.thread = threading.Thread(target=self._run_websocket, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.running = False
+        if self.ws:
+            self.ws.close()
+
+    def _run_websocket(self):
+        websocket.enableTrace(False)
+        while self.running:
+            try:
+                self.ws = websocket.WebSocketApp(self.url,
+                                               on_message=self._on_message,
+                                               on_error=self._on_error,
+                                               on_close=self._on_close,
+                                               on_open=self._on_open)
+                self.ws.run_forever()
+                
+                # If we get here, the connection was closed
+                if self.running:
+                    print(f"WebSocket disconnected, attempting to reconnect in {self.reconnect_interval} seconds...")
+                    time.sleep(self.reconnect_interval)
+            except Exception as e:
+                print(f"WebSocket error: {e}")
+                time.sleep(self.reconnect_interval)
+
+    def _on_message(self, ws, message):
+        try:
+            data = json.loads(message)
+            if isinstance(data, dict) and self.on_flag_update:
+                self.on_flag_update(data)
+        except json.JSONDecodeError:
+            print(f"Invalid JSON received: {message}")
+        except Exception as e:
+            print(f"Error processing message: {e}")
+
+    def _on_error(self, ws, error):
+        print(f"WebSocket error: {error}")
+
+    def _on_close(self, ws, close_status_code, close_msg):
+        self.is_connected = False
+        print(f"WebSocket connection closed: {close_status_code} - {close_msg}")
+
+    def _on_open(self, ws):
+        self.is_connected = True
+        print("WebSocket connection established")
+
+        # Send initial connection message
+        try:
+            ws.send(json.dumps({"type": "subscribe", "channel": "flags"}))
+        except Exception as e:
+            print(f"Error sending initial message: {e}")
 
 
 def relative_to_assets(path: str, assets_path: Path) -> Path:
@@ -359,23 +430,81 @@ def open_system_page():
     # Store blinker references
     system_window.blinkers = blinkers
 
-#####################################ControPanel#####################################
-    blinkers[8].toggle(True)  # Image 8 (Violence)
-    blinkers[9].toggle(False)  # Image 9 ( Air Safety Warning )
-    blinkers[10].toggle(False)  # Image 10 (Health Warning )
-    blinkers[11].toggle(False)  # Image 11 ( Driver Distraction Warning )
-    blinkers[12].toggle(False)  # Image 12 ( Driver Drowsiness Warning )
-    blinkers[13].toggle(False)  # Image 13 ( Lane Departure Warning )
-    blinkers[15].toggle(False)  # Image 15 ( Emotion Recognition )
-    blinkers[16].toggle(False)  # Image 16 ( blind spot detection mirrors -Left )
-    blinkers[17].toggle(True)  # Image 17 ( blind spot detection mirrors -Right )
-    # Example usage:
-    pair20_21.toggle(True)  # Start 20-21 toggle (UP arrow)
+#####################################ControlPanel#####################################
+    # Initialize with default values
+    blinkers[8].toggle(False)  # Image 8 (Violence)
+    blinkers[9].toggle(False)  # Image 9 (Air Safety Warning)
+    blinkers[10].toggle(False)  # Image 10 (Health Warning)
+    blinkers[11].toggle(False)  # Image 11 (Driver Distraction Warning)
+    blinkers[12].toggle(False)  # Image 12 (Driver Drowsiness Warning)
+    blinkers[13].toggle(False)  # Image 13 (Lane Departure Warning)
+    blinkers[15].toggle(False)  # Image 15 (Emotion Recognition)
+    blinkers[16].toggle(False)  # Image 16 (blind spot detection mirrors -Left)
+    blinkers[17].toggle(False)  # Image 17 (blind spot detection mirrors -Right)
+    
+    pair20_21.toggle(False)  # Start 20-21 toggle (UP arrow)
     pair22_23.toggle(False)  # Start 22-23 toggle (Left arrow)
     pair24_25.toggle(False)  # Stop 24-25 toggle (Down arrow)
     pair26_27.toggle(False)  # Start 26-27 toggle (Right arrow)
     toggle_28_29(False)  # Brakes
+    
+    # Flag-to-element mapping
+    flag_mapping = {
+        'violence': 8,
+        'air_safety': 9,
+        'health': 10,
+        'distraction': 11,
+        'drowsiness': 12,
+        'lane_departure': 13,
+        'emotion': 15,
+        'blind_spot_left': 16,
+        'blind_spot_right': 17,
+        'up_arrow': (pair20_21, True),
+        'left_arrow': (pair22_23, True),
+        'down_arrow': (pair24_25, True),
+        'right_arrow': (pair26_27, True),
+        'brakes': True  # For toggle_28_29 function
+    }
+    
+    # WebSocket flag handling function
+    def handle_flags(flag_data):
+        print(f"Received flags: {flag_data}")
+        
+        # Process each flag in the data
+        for flag_name, flag_value in flag_data.items():
+            if flag_name in flag_mapping:
+                element = flag_mapping[flag_name]
+                
+                # Handle different types of UI elements
+                if isinstance(element, int):
+                    # This is a blinker image
+                    blinkers[element].toggle(flag_value)
+                elif isinstance(element, tuple) and isinstance(element[0], ImagePair):
+                    # This is an image pair
+                    pair, _ = element
+                    pair.toggle(flag_value)
+                elif flag_name == 'brakes':
+                    # Special case for brake toggle
+                    toggle_28_29(flag_value)
+                    
+        # Update UI immediately
+        system_window.update()
+    
+    # Initialize WebSocket client
+    ws_client = FlagWebSocketClient("ws://localhost:8765", handle_flags)
+    ws_client.start()
+    
+    # Store WebSocket client reference to prevent garbage collection and allow cleanup
+    system_window.ws_client = ws_client
 ###########################################################################################
+    # Clean up WebSocket client when window is closed
+    def on_window_close():
+        if hasattr(system_window, 'ws_client'):
+            system_window.ws_client.stop()
+        system_window.destroy()
+    
+    system_window.protocol("WM_DELETE_WINDOW", on_window_close)
+    
     system_window.mainloop()
 
 
@@ -410,7 +539,7 @@ def open_map_page():
     canvas.place(x=0, y=-1)
 
     # Load map page assets
-    assets_path = Path(r"D:\PycharmProjects\INNOVADRIVEfinal\Mappage_TEST\build\assets\frame0")
+    assets_path = Path(r"Mappage_TEST/build/assets/frame0")
 
     # Load and place map page images
     image_image_1 = PhotoImage(file=assets_path / "image_1.png")
@@ -472,7 +601,7 @@ def show_main_page():
     window.configure(bg="#FFFFFF")
 
     # Main assets path
-    main_assets_path = Path(r"D:\PycharmProjects\INNOVADRIVEfinal\Mainpage-TEST\build\assets\frame0")
+    main_assets_path = Path(r"Mainpage-TEST/build/assets/frame0")
 
     canvas = Canvas(
         window,
